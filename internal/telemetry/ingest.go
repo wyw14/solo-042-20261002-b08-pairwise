@@ -37,17 +37,25 @@ func NewIngestor(probes *probe.Registry, vessels *vessel.StateService, snapshots
 func (i *Ingestor) Ingest(sample model.Sample) error {
 	probeState, ok := i.probes.Get(sample.ProbeID)
 	if !ok {
-		return errors.New("sample probe is not registered")
+		return i.reject(errors.New("sample probe is not registered"))
 	}
-	if !probeState.Connected || sample.CalibrationEpoch != probeState.CalibrationEpoch || sample.BindingGeneration != probeState.BindingGeneration {
-		i.mu.Lock()
-		i.dropped++
-		i.mu.Unlock()
-		return errors.New("sample belongs to an obsolete probe generation")
+	switch {
+	case !probeState.Connected:
+		return i.reject(errors.New("sample probe is not connected"))
+	case !sample.Kind.Valid():
+		return i.reject(errors.New("unsupported sample kind"))
+	case sample.Kind != probeState.Kind:
+		return i.reject(errors.New("sample probe kind does not match registration"))
+	case sample.VesselID != probeState.VesselID:
+		return i.reject(errors.New("sample vessel does not match probe binding"))
+	case sample.CalibrationEpoch != probeState.CalibrationEpoch:
+		return i.reject(errors.New("sample belongs to an obsolete calibration epoch"))
+	case sample.BindingGeneration != probeState.BindingGeneration:
+		return i.reject(errors.New("sample belongs to an obsolete probe generation"))
 	}
 	vesselState, ok := i.vessels.Registry().Get(probeState.VesselID)
 	if !ok {
-		return errors.New("sample vessel is not registered")
+		return i.reject(errors.New("sample vessel is not registered"))
 	}
 	level, pressure, temperature := vesselState.LevelMM, vesselState.PressureKPa, vesselState.TemperatureC
 	switch sample.Kind {
@@ -57,12 +65,10 @@ func (i *Ingestor) Ingest(sample model.Sample) error {
 		pressure = sample.Value
 	case model.ProbeTemperature:
 		temperature = sample.Value
-	default:
-		return errors.New("unsupported sample kind")
 	}
 	updated, err := i.vessels.ApplyTelemetry(probeState.VesselID, level, pressure, temperature, sample.ObservedAt)
 	if err != nil {
-		return err
+		return i.reject(err)
 	}
 	i.snapshots.Apply(updated)
 	i.mu.Lock()
@@ -73,6 +79,16 @@ func (i *Ingestor) Ingest(sample model.Sample) error {
 		observer(sample)
 	}
 	return nil
+}
+
+// reject records a dropped sample. Rejection counters must agree with the
+// error returned to the caller, so every refused sample is counted here before
+// any vessel state or observer side effect can occur.
+func (i *Ingestor) reject(err error) error {
+	i.mu.Lock()
+	i.dropped++
+	i.mu.Unlock()
+	return err
 }
 
 func (i *Ingestor) Stats() (accepted, dropped uint64) {
