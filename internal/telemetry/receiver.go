@@ -30,6 +30,15 @@ func (r *Receiver) Publish(probeID string, value float64, observedAt time.Time) 
 }
 
 func (r *Receiver) PublishSample(sample model.Sample) error {
+	probeState, ok := r.registry.Get(sample.ProbeID)
+	if !ok {
+		r.record(false)
+		return errors.New("probe not found")
+	}
+	if err := validateSample(sample, probeState); err != nil {
+		r.record(false)
+		return err
+	}
 	subscription, ok := r.registry.Subscription(sample.ProbeID)
 	if !ok || subscription.Closed() {
 		r.record(false)
